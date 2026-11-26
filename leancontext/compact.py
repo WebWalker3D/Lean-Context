@@ -108,42 +108,53 @@ def _generic_view(text: str, *, store: Store, max_chars: int,
     header = f'[LeanContext excerpt: {len(text)} chars, {len(lines)} lines; original line numbers]\n'
     available = max_chars - len(header) - len(footer) - 95
     width = max(70, min(900, available // 3))
-    rendered = [f'L{i+1}: {_short_line(s, width)}\n' for i, s in enumerate(lines)]
-    selected: set[int] = set()
-    priorities: list[int] = []
+    # Only materialize lines that fit the view. An eager rendered list and
+    # priority list scale with the whole log rather than the response budget.
+    selected: dict[int, str] = {}
     diagnostics = [i for i, s in enumerate(lines) if DIAGNOSTIC.search(s)]
     summaries = [i for i, s in enumerate(lines) if SUMMARY.search(s)]
-    # An ocean of warnings must not crowd out a later fatal error. Alternate
-    # early/late errors so a long failure list doesn't hide the final cause.
     severe = [i for i in diagnostics if SEVERE.search(lines[i])]
-    for left in range((len(severe)+1)//2):
-        priorities.append(severe[left])
-        priorities.append(severe[-1-left])
-    priorities.extend(reversed(summaries))
-    for distance in (1, 2, 3):
-        for i in severe:
-            priorities.extend((i + distance, i - distance))
-    priorities.extend(diagnostics)
-    priorities.extend(range(max(0, len(lines)-8), len(lines)))
-    priorities.extend(range(min(8, len(lines))))
-    # Fill a little context from the beginning only if the informative set is small.
-    priorities.extend(range(min(50, len(lines))))
+
+    def priorities():
+        # Keep the exact early/late error ordering and fallback order.
+        for left in range((len(severe)+1)//2):
+            yield severe[left]
+            yield severe[-1-left]
+        yield from reversed(summaries)
+        for distance in (1, 2, 3):
+            for i in severe:
+                yield i + distance
+                yield i - distance
+        yield from diagnostics
+        yield from range(max(0, len(lines)-8), len(lines))
+        yield from range(min(8, len(lines)))
+        yield from range(min(50, len(lines)))
+
+    def render(i):
+        return f'L{i+1}: {_short_line(lines[i], width)}\n'
+
     spent = 0
-    for i in priorities:
+    # Even an empty first line costs len("L1: \n") + 32 characters.
+    minimum_cost = len('L1: \n') + 32
+    for i in priorities():
+        if available - spent < minimum_cost:
+            break
         if i < 0 or i >= len(lines) or i in selected:
             continue
-        cost = len(rendered[i]) + 32  # conservative space for a gap marker
+        line = render(i)
+        cost = len(line) + 32  # conservative space for a gap marker
         if spent + cost <= available:
-            selected.add(i)
+            selected[i] = line
             spent += cost
     if not selected:
-        selected.add(diagnostics[0] if diagnostics else 0)
+        i = diagnostics[0] if diagnostics else 0
+        selected[i] = render(i)
     parts = [header]
     previous = -1
     for i in sorted(selected):
         if i > previous + 1:
             parts.append(f'... {i-previous-1} lines omitted ...\n')
-        parts.append(rendered[i])
+        parts.append(selected[i])
         previous = i
     if previous < len(lines)-1:
         parts.append(f'... {len(lines)-previous-1} lines omitted ...\n')
