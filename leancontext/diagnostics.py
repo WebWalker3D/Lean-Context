@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 import json
-from pathlib import PurePath
+from pathlib import PurePath, PureWindowsPath
 import re
 import shlex
 
@@ -31,9 +31,15 @@ def source_command(metadata: dict | None) -> bool:
             argv = shlex.split(metadata['command'])
         except ValueError:
             return False
-    if not isinstance(argv, (list, tuple)) or not argv or not isinstance(argv[0], str):
+    if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(arg, str) for arg in argv):
         return False
-    name = PurePath(argv[0]).name
+    executable = argv[0]
+    # Windows paths can occur in archived metadata on another host. Recognize
+    # executable suffixes without inferring intent from arbitrary shell scripts.
+    if '\\' in executable or executable.lower().endswith('.exe'):
+        name = PureWindowsPath(executable).name.lower().removesuffix('.exe')
+    else:
+        name = PurePath(executable).name
     if name in {'rg', 'grep', 'ag', 'ack', 'cat', 'sed', 'awk', 'head'}:
         return True
     if name == 'git':
